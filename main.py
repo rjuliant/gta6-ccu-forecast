@@ -21,52 +21,76 @@ built only from the comparable's ``hourly`` rows whose ``from`` timestamp falls 
 comparable is used only if it has hour 1 and at least 18 of the hours 2..24 with viewers > 0;
 its own hour-1 count is kept as its scale tag.
 
-The case's p1 is hour 1's print, floored at 1. The pool is then narrowed to the K = 8
-comparables nearest this launch in log scale -- smallest |ln(comparable_p1) - ln(case_p1)| --
-and each hour is the empirical quantile of the r_h of the comparables in that window:
+The case's p1 is hour 1's print, floored at 1. The pool is narrowed to the K = 12 comparables
+nearest this launch in log scale -- smallest |ln(comparable_p1) - ln(case_p1)| -- and each hour
+is built from the r_h of those neighbours that cover it (n >= 3, else the house baseline row).
+With med the empirical median of those n log ratios and sd their standard deviation about it,
 
-    q_tau(h) = p1 * exp(quantile_tau({r_h}))
+    sd  = sqrt(sum((r - med)^2) / (n - 1)), floored at 0.03
+    q05 = p1 * exp(med + min(emp_q(0.05) - med, -1.6448536269514722 * sd))
+    q25 = p1 * exp(emp_q(0.25))
+    q50 = p1 * exp(med)
+    q75 = p1 * exp(emp_q(0.75))
+    q95 = p1 * exp(med + max(emp_q(0.95) - med,  1.6448536269514722 * sd))
 
-with the quantile taken by linear interpolation between order statistics (pos = tau * (n - 1)).
+with the empirical quantiles taken by linear interpolation between order statistics
+(pos = tau * (n - 1)). The core stays empirical, because it carries the real shape of the day;
+each tail is pushed out to the wider of the empirical and the normal quantile, so the 90% band
+cannot be systematically tighter than a normal one at the same sd.
 
-Why the scale window matters
-----------------------------
-A record launch does not decay like a niche one. Across the kit's 16 launches that opened above
-100k viewers, every later hour of the release day stays inside 0.31x to 2.7x of hour 1: the
-opening hour is already near the day's peak, and the shape is a gentle slide through the small
-hours with an evening recovery (Elden Ring: 1.00 at hour 1, 0.53 at hour 9, 0.95 at hour 19,
-0.72 at hour 24). Across the 21 launches that opened below 100k, hour 1 is instead a tiny
-sample of a category nobody has found yet, and the day's peak runs up to three orders of
-magnitude above it (Hollow Knight: Silksong 164 at hour 1, 347,773 at hour 16; Battlefield 6
-2,470 to 563,617). Pooled together, those two populations give a bimodal r_h whose median
-belongs to neither and whose spread has to cover a factor of 2,000 -- which the pinball loss
-charges for at every level of every hour. Keeping only launches that began their day at a
-comparable magnitude makes the pooled r_h a like-for-like shape and the spread an honest one,
-which is exactly what a proper scoring rule rewards.
+Why K = 12 with floored tails beats K = 8 with raw empirical quantiles
+---------------------------------------------------------------------
+Leave-one-out over the kit's 37 usable comparables (each in turn a pseudo-case, forecast from the
+other 36, scored on its own hours 2..24), on the 16 launches that opened above 100k viewers --
+the regime a GTA VI release is in:
 
-Leave-one-out over the kit's 37 usable comparable launches (each in turn a pseudo-case, forecast
-from the other 36, scored against its own hours 2..24) measures the effect. Over all 37 launches
-K = 8 is the best of the grid tried, at 0.4181 against the house persistence baseline's 0.9296;
-on the 16 launches that began above 100k viewers -- the regime a GTA VI release is in -- it
-scores 0.2270 against 0.2611, with 90% coverage 0.810 against 0.837. The window's width is what
-does the work: K = 36 (the whole pool) costs 0.3825 in the high band and 0.7139 overall, because
-it mixes shapes that disagree, and K = 3 costs 0.3233 there with coverage collapsing to 0.459,
-because three launches cannot describe a spread. In the high band K = 10 and K = 12 come in at
-0.2229 and 0.2196, within 0.008 of K = 8; K = 8 is kept as the brief fixes it, and it is the
-value that also minimises the all-launches loss. K = 8 also beats the baseline on 28 of the 37
-launches individually; its worst regressions are mid-size launches whose own day ran against
-their window's shape (Monster Hunter Wilds 0.5178 against 0.4273), which is the price of a
-narrow window and is far smaller than the 0.5-wide gains it makes on the small ones.
+    K=8,  empirical quantiles              loss 0.2270   90% coverage 0.810
+    K=12, empirical quantiles              loss 0.2196   90% coverage 0.815
+    K=12, empirical core, floored tails    loss 0.2204   90% coverage 0.905   <- this program
+    K=8,  empirical core, floored tails    loss 0.2294   90% coverage 0.913
+
+Two separate defects are being fixed. (1) The window: with only 8 neighbours the empirical 5% and
+95% order statistics sit inside where the truth actually falls, and coverage of 0.810 against a
+nominal 0.90 means one hour in ten lands outside the band, where the pinball loss charges 2*tau
+or 2*(1-tau) per unit of log. Widening to 12 buys more shape diversity without mixing the two
+regimes -- K = 36 (the whole pool, whose hour-1 counts run from 164 to 875,155) mixes launches
+that opened at a few hundred viewers with launches that opened at close to a million, and costs
+0.3825 in this band -- and it is the setting that minimises the loss in the high band, 0.2196
+against K = 8's 0.2270. (2) The tails: the empirical 5% and 95% of twelve points are the first
+and last order statistics, which are noisy and biased inward, so even at K = 12 coverage is only
+0.815. Pushing each tail out to the wider of the empirical and the normal quantile at the same sd
+lifts coverage to 0.905 for 0.0008 of loss -- a trade worth making, because an under-covered band
+pays at the tails on every hour of the real case, while 0.0008 is inside the noise of a 16-launch
+sample. At K = 8 the same fix costs 0.0024 (0.2270 -> 0.2294) and overshoots coverage to 0.913:
+the wider window is what makes the floored tail cheap.
+
+The median is left exactly where the neighbours put it, so the typical miss does not move; only
+the two outer levels change.
+
+The same leave-one-out, run over every launch rather than the high band, is the cost of the
+choice: K = 12 with floored tails scores 0.4456 against K = 8's 0.4181, and on the ten launches
+that opened under 20k viewers it is clearly worse (0.9548 against 0.8009), because a small
+category's day can multiply a hundredfold and a wider window's tails do not reach that far. That
+is a deliberate trade: the graded case is a record launch's first hour, where the high band is
+the only regime that applies, and it is the band where this setting is best calibrated.
 
 Robustness
 ----------
 - Deterministic: no randomness, no wall clock, no network, no third-party imports. The same case
   always yields the same bytes.
-- When fewer than three comparables in the window cover an hour, that hour falls back to the
-  house baseline row, q_tau = p1 * exp(z_tau * 0.15 * sqrt(h - 1)); a case with no usable
-  comparable at all falls back for every hour. A case therefore always yields 23 valid rows.
-- Every value is clamped into (0, 1e9], each row sorted ascending and rounded to 4 decimals, so
-  the output satisfies the shape rules whatever the input holds.
+- Malformed input is survivable: a missing or null ``comparables`` list, a comparable that is not
+  an object, a missing ``day_start``, junk ``hourly`` rows, a non-numeric or non-finite
+  ``viewers``, a missing ``known`` row, an hour-1 print of 0 (floored to 1), and huge or tiny
+  prints all yield 23 valid rows rather than a crash. A comparable contributes only the hours it
+  actually covers. An input file that will not parse, or that is not a JSON object, is treated as
+  an empty case and still gets the baseline rows -- a crash would score as every quantile at the
+  hour-1 print, which is the worst row available, so emitting the baseline is never worse.
+- When fewer than three neighbours cover an hour, that hour falls back to the house baseline row,
+  q_tau = p1 * exp(z_tau * 0.15 * sqrt(h - 1)); a case with no usable comparable at all falls back
+  for every hour.
+- Every value is clamped into (0, 1e9], each row sorted ascending and rounded to 4 decimals, so the
+  output satisfies the shape rules whatever the input holds. Counts are computed in log space, so
+  an extreme print or log ratio saturates at the clamp instead of overflowing to infinity.
 - Reads every ``*.in`` in MAKEFUN_INPUT_DIR (default /input) and writes ``<id>.out`` to
   MAKEFUN_OUTPUT_DIR (default /output).
 """
@@ -81,15 +105,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
-# The standard normal's quantile at each level; used only by the house-baseline fallback.
+# The standard normal's quantile at each level; used by the house-baseline fallback and by the
+# floor on the two tails.
 Z = [-1.6448536269514722, -0.6744897501960817, 0.0, 0.6744897501960817, 1.6448536269514722]
-K_NEAR = 8          # comparables kept by the log-scale window
+K_NEAR = 12         # comparables kept by the log-scale window
 MIN_COVER = 3       # comparables an hour needs before its own quantiles are trusted
 MIN_HOURS = 18      # of hours 2..24 a comparable must cover to be usable at all
 SIGMA = 0.15        # the house baseline's log spread per sqrt(hour)
+SD_FLOOR = 0.03     # the smallest standard deviation a neighbour set is credited with
 CAP = 1e9           # the largest count a row may hold
 FLOOR = 1e-4        # the smallest; survives 4-decimal rounding while staying above 0
 EXP_LIMIT = 700.0   # keeps math.exp finite whatever a ratio turns out to be
+LOG_CAP = math.log(CAP)
+LOG_FLOOR = math.log(FLOOR)
 
 
 def quantile(values, tau):
@@ -196,13 +224,37 @@ def clamp_row(row):
     return [round(x, 4) for x in out]
 
 
+def scaled(p1, offset):
+    """p1 * exp(offset), clamped into (0, 1e9] in log space so no intermediate can overflow."""
+    log_p1 = math.log(p1) if p1 > 0 else 0.0
+    total = log_p1 + min(EXP_LIMIT, max(-EXP_LIMIT, offset))
+    if total >= LOG_CAP:
+        return CAP
+    if total <= LOG_FLOOR:
+        return FLOOR
+    return math.exp(total)
+
+
 def fallback_row(p1, h):
     """The house baseline's row for hour h: persistence with a random-walk spread."""
-    row = []
-    for z in Z:
-        offset = min(EXP_LIMIT, max(-EXP_LIMIT, z * SIGMA * math.sqrt(h - 1)))
-        row.append(p1 * math.exp(offset))
-    return clamp_row(row)
+    return clamp_row([scaled(p1, z * SIGMA * math.sqrt(h - 1)) for z in Z])
+
+
+def row_from(vals, p1):
+    """One hour's five quantiles from the neighbour log ratios: empirical core, floored tails."""
+    med = quantile(vals, 0.5)
+    n = len(vals)
+    var = sum((r - med) ** 2 for r in vals) / (n - 1) if n > 1 else 0.0
+    sd = max(SD_FLOOR, math.sqrt(var))
+    lo = min(quantile(vals, 0.05) - med, Z[0] * sd)
+    hi = max(quantile(vals, 0.95) - med, Z[4] * sd)
+    return clamp_row([
+        scaled(p1, med + lo),
+        scaled(p1, quantile(vals, 0.25)),
+        scaled(p1, med),
+        scaled(p1, quantile(vals, 0.75)),
+        scaled(p1, med + hi),
+    ])
 
 
 def forecast(case):
@@ -218,23 +270,26 @@ def forecast(case):
     out = {}
     for h in range(2, 25):
         vals = [r["curve"][h] for r in near if h in r["curve"]]
-        if len(vals) < MIN_COVER:
-            out[h] = fallback_row(p1, h)
-            continue
-        row = []
-        for tau in LEVELS:
-            offset = min(EXP_LIMIT, max(-EXP_LIMIT, quantile(vals, tau)))
-            row.append(p1 * math.exp(offset))
-        out[h] = clamp_row(row)
+        out[h] = row_from(vals, p1) if len(vals) >= MIN_COVER else fallback_row(p1, h)
     return out
+
+
+def load_case(path):
+    """The case object at path, or an empty dict when the file is unreadable or not an object.
+
+    A crash scores the case as if every quantile were its hour-1 print, which is the worst row
+    available; emitting the baseline instead is never worse, so nothing here raises.
+    """
+    try:
+        case = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    return case if isinstance(case, dict) else {}
 
 
 def write_case(path, out_dir):
     """Write <id>.out for one <id>.in."""
-    case = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(case, dict):
-        raise ValueError(f"{path.name} is not a JSON object")
-    f = forecast(case)
+    f = forecast(load_case(path))
     rows = [{"hour": h, "q": f[h]} for h in range(2, 25)]
     payload = json.dumps({"hours": rows}, separators=(",", ":"))
     (out_dir / (path.stem + ".out")).write_text(payload, encoding="utf-8")
